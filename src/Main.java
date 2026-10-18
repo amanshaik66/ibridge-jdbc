@@ -62,6 +62,8 @@ public class Main {
         server.createContext("/session/open", Main::handleSessionOpen);
         server.createContext("/session/run", Main::handleSessionRun);
         server.createContext("/session/close", Main::handleSessionClose);
+        server.createContext("/session/screen", Main::handleSessionScreen);
+        server.createContext("/session/keys", Main::handleSessionKeys);
         server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
         Thread sweeper = new Thread(() -> {
@@ -154,6 +156,116 @@ public class Main {
             if (s != null) s.conn.close();
         }
         respond(ex, 200, "{\"ok\":true}");
+    }
+
+    /** Shared live-session lookup: writes the error response and returns null when unusable. */
+    static LiveSession requireSession(HttpExchange ex, String token) throws IOException {
+        LiveSession s = token == null ? null : SESSIONS.get(token);
+        if (s == null) {
+            respond(ex, 404, "{\"ok\":false,\"error\":\"session_expired\",\"message\":\"Session expired or not found. Sign in again.\"}");
+            return null;
+        }
+        if (System.currentTimeMillis() - s.lastUsed > SESSION_IDLE_MS) {
+            if (SESSIONS.remove(token, s)) s.conn.close();
+            respond(ex, 404, "{\"ok\":false,\"error\":\"session_expired\",\"message\":\"Session expired. Sign in again.\"}");
+            return null;
+        }
+        return s;
+    }
+
+    static String snapshotJson(Tn5250Run.Snapshot snap) {
+        StringBuilder jb = new StringBuilder("{\"ok\":true,\"screen\":{\"rows\":[");
+        for (int i = 0; i < snap.rows.length; i++) {
+            if (i > 0) jb.append(',');
+            jb.append(jsonQuote(snap.rows[i]));
+        }
+        jb.append("],\"fields\":[");
+        for (int i = 0; i < snap.fieldPos.size(); i++) {
+            int[] p = snap.fieldPos.get(i);
+            if (i > 0) jb.append(',');
+            jb.append("{\"i\":").append(p[0])
+              .append(",\"row\":").append(p[1])
+              .append(",\"col\":").append(p[2])
+              .append(",\"len\":").append(p[3])
+              .append(",\"value\":").append(jsonQuote(snap.fieldVal.get(i)))
+              .append(",\"bypass\":").append(snap.fieldBypass.get(i))
+              .append('}');
+        }
+        jb.append("]}}");
+        return jb.toString();
+    }
+
+    /** POST /session/screen {session} -> current 5250 screen (interactive terminal) */
+    static void handleSessionScreen(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, err("POST required.")); return; }
+        if (!authed(ex)) { respond(ex, 401, err("unauthorized")); return; }
+        String body = readBody(ex);
+        LiveSession s = requireSession(ex, jsonStr(body, "session"));
+        if (s == null) return;
+        try {
+            Tn5250Run.Snapshot snap = s.conn.snapshot();
+            s.lastUsed = System.currentTimeMillis();
+            respond(ex, 200, snapshotJson(snap));
+        } catch (Exception e) {
+            respond(ex, 502, err("Screen read failed: " + e.getMessage()));
+        }
+    }
+
+    /** POST /session/keys {session, fields:{idx:value}, aid} -> send keys, return new screen */
+    static void handleSessionKeys(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, err("POST required.")); return; }
+        if (!authed(ex)) { respond(ex, 401, err("unauthorized")); return; }
+        String body = readBody(ex);
+        String token = jsonStr(body, "session");
+        LiveSession s = requireSession(ex, token);
+        if (s == null) return;
+        String aid = jsonStr(body, "aid");
+        java.util.Map<Integer, String> values = new java.util.HashMap<>();
+        // Extract the flat "fields" object: {"0":"text","3":"more"}
+        int fi = body.indexOf("\"fields\"");
+        if (fi >= 0) {
+            int open = body.indexOf('{', fi + 8);
+            if (open >= 0) {
+                int depth = 0, end = -1;
+                for (int i = open; i < body.length(); i++) {
+                    char ch = body.charAt(i);
+                    if (ch == '{') depth++;
+                    else if (ch == '}' && --depth == 0) { end = i; break; }
+                }
+                if (end > open) {
+                    String inner = body.substring(open, end + 1);
+                    java.util.regex.Matcher m = java.util.regex.Pattern
+                            .compile("\"(\\d+)\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(inner);
+                    while (m.find()) {
+                        String raw = m.group(2);
+                        StringBuilder sb = new StringBuilder();
+                        for (int k = 0; k < raw.length(); k++) {
+                            char ch = raw.charAt(k);
+                            if (ch == '\\' && k + 1 < raw.length()) {
+                                char e = raw.charAt(++k);
+                                switch (e) {
+                                    case 'n' -> sb.append('\n');
+                                    case 't' -> sb.append('\t');
+                                    case 'r' -> sb.append('\r');
+                                    case 'u' -> { sb.append((char) Integer.parseInt(raw.substring(k + 1, k + 5), 16)); k += 4; }
+                                    default -> sb.append(e);
+                                }
+                            } else sb.append(ch);
+                        }
+                        values.put(Integer.parseInt(m.group(1)), sb.toString());
+                    }
+                }
+            }
+        }
+        try {
+            Tn5250Run.Snapshot snap = s.conn.interact(values, aid == null ? "ENTER" : aid);
+            s.lastUsed = System.currentTimeMillis();
+            respond(ex, 200, snapshotJson(snap));
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.length() > 800) msg = msg.substring(0, 800);
+            respond(ex, 502, err("Key send failed: " + msg));
+        }
     }
 
     static String resultJson(Tn5250Run.Result res) {

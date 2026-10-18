@@ -348,8 +348,95 @@ public class Tn5250Run {
         }
     }
 
+    // ---- Interactive terminal (Step 1): screen snapshots + keystrokes ----
+
+    public static class Snapshot {
+        public String[] rows;
+        public java.util.List<int[]> fieldPos = new ArrayList<>(); // {index, row, col, len}
+        public java.util.List<String> fieldVal = new ArrayList<>();
+        public java.util.List<Boolean> fieldBypass = new ArrayList<>();
+    }
+
+    /** Current screen as text rows plus its input fields (for the web terminal). */
+    public synchronized Snapshot snapshot() {
+        Snapshot s = new Snapshot();
+        s.rows = text().split("\n", -1);
+        ScreenField[] fs = scr.getScreenFields().getFields();
+        if (fs != null) {
+            for (int i = 0; i < fs.length; i++) {
+                s.fieldPos.add(new int[]{i, fs[i].getCursorRow(), fs[i].getCursorCol(), fs[i].getLength()});
+                String v = fs[i].getString();
+                s.fieldVal.add(v == null ? "" : v);
+                s.fieldBypass.add(fs[i].isBypassField());
+            }
+        }
+        return s;
+    }
+
+    private static KeyMnemonic mnemonic(String aid) {
+        if (aid == null) return KeyMnemonic.ENTER;
+        switch (aid.toUpperCase()) {
+            case "ENTER": return KeyMnemonic.ENTER;
+            case "CLEAR": return KeyMnemonic.CLEAR;
+            case "HELP": return KeyMnemonic.HELP;
+            case "PRINT": return KeyMnemonic.PRINT;
+            case "PAGE_UP": case "ROLL_UP": return KeyMnemonic.PAGE_UP;
+            case "PAGE_DOWN": case "ROLL_DOWN": return KeyMnemonic.PAGE_DOWN;
+            case "ATTN": return KeyMnemonic.ATTN;
+            case "RESET": return KeyMnemonic.RESET;
+            default:
+                if (aid.toUpperCase().startsWith("PF")) {
+                    try {
+                        int n = Integer.parseInt(aid.substring(2));
+                        switch (n) {
+                            case 1: return KeyMnemonic.PF1; case 2: return KeyMnemonic.PF2;
+                            case 3: return KeyMnemonic.PF3; case 4: return KeyMnemonic.PF4;
+                            case 5: return KeyMnemonic.PF5; case 6: return KeyMnemonic.PF6;
+                            case 7: return KeyMnemonic.PF7; case 8: return KeyMnemonic.PF8;
+                            case 9: return KeyMnemonic.PF9; case 10: return KeyMnemonic.PF10;
+                            case 11: return KeyMnemonic.PF11; case 12: return KeyMnemonic.PF12;
+                            case 13: return KeyMnemonic.PF13; case 14: return KeyMnemonic.PF14;
+                            case 15: return KeyMnemonic.PF15; case 16: return KeyMnemonic.PF16;
+                            case 17: return KeyMnemonic.PF17; case 18: return KeyMnemonic.PF18;
+                            case 19: return KeyMnemonic.PF19; case 20: return KeyMnemonic.PF20;
+                            case 21: return KeyMnemonic.PF21; case 22: return KeyMnemonic.PF22;
+                            case 23: return KeyMnemonic.PF23; case 24: return KeyMnemonic.PF24;
+                        }
+                    } catch (Exception ignore) {}
+                }
+                return KeyMnemonic.ENTER;
+        }
+    }
+
+    /** Apply edited field values, send an AID key, return the new screen. */
+    public synchronized Snapshot interact(java.util.Map<Integer, String> values, String aid) throws Exception {
+        ScreenField[] fs = scr.getScreenFields().getFields();
+        if (fs != null && values != null) {
+            for (java.util.Map.Entry<Integer, String> e : values.entrySet()) {
+                int i = e.getKey();
+                if (i >= 0 && i < fs.length && !fs[i].isBypassField()) {
+                    fs[i].setString(e.getValue() == null ? "" : e.getValue());
+                }
+            }
+        }
+        scr.sendKeys(mnemonic(aid));
+        waitStable(20000);
+        return snapshot();
+    }
+
     /** Run one command in this live session; the session stays signed on. */
     public synchronized Result runCommand(String kind, String command) throws Exception {
+        // If the terminal left the session inside a display screen, back out
+        // with PF3 (up to 3 screens) before expecting a command line.
+        if (!text().contains("===>")) {
+            for (int i = 0; i < 3 && !text().contains("===>"); i++) {
+                scr.sendKeys(KeyMnemonic.PF3);
+                waitStable(8000);
+            }
+            if (!text().contains("===>")) {
+                throw new Exception("Session is inside a display screen with no command line. Use F3 in the terminal to exit it first.");
+            }
+        }
         String out = "sql".equals(kind) ? runSqlQsh(command) : runCl(command);
         if ("sql".equals(kind)) {
             Result parsed = parseDb2(out);
