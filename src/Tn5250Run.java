@@ -28,6 +28,7 @@ public class Tn5250Run {
 
     private String text() {
         char[] c = scr.getCharacters();
+        for (int i = 0; i < c.length; i++) if (c[i] == '\0') c[i] = ' ';
         int rows = scr.getRows(), cols = scr.getColumns();
         StringBuilder sb = new StringBuilder();
         for (int r = 0; r < rows; r++) {
@@ -101,9 +102,14 @@ public class Tn5250Run {
         Tn5250Run r = new Tn5250Run(session);
         try {
             session.connect();
-            // Sign-on screen
-            if (!r.waitFor("Sign On", 45000)) {
-                throw new Exception("5250 sign-on screen did not appear. Last screen: " + trimBlock(r.text()));
+            // PUB400 first shows a Welcome banner screen; Enter leads to Sign On.
+            if (!r.waitFor("Sign On", 20000)) {
+                if (r.text().contains("Welcome")) {
+                    r.scr.sendKeys(KeyMnemonic.ENTER);
+                }
+                if (!r.waitFor("Sign On", 30000)) {
+                    throw new Exception("5250 sign-on screen did not appear. Last screen: " + trimBlock(r.text()));
+                }
             }
             r.waitStable(5000);
             ScreenField[] f = r.scr.getScreenFields().getFields();
