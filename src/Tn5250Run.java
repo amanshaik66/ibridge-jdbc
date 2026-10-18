@@ -153,7 +153,7 @@ public class Tn5250Run {
         java.util.List<int[]> spans = null;
         for (int i = 0; i < lines.length; i++) {
             String t = lines[i].trim();
-            if (t.matches("^(-{3,}\\s+)*-{3,}\\s*$")) {
+            if (t.matches("^(-{2,}\\s+)*-{2,}\\s*$")) {
                 dashIdx = i;
                 spans = new ArrayList<>();
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("-+").matcher(lines[i]);
@@ -216,8 +216,8 @@ public class Tn5250Run {
         if (total <= 0) {
             all.append(extractQsh(text()));
         } else {
-            int chunk = 16;
-            int cap = Math.min(total, 208);
+            int chunk = 7;
+            int cap = Math.min(total, 245);
             for (int a = 1; a <= cap; a += chunk) {
                 int b = Math.min(a + chunk - 1, cap);
                 sendLine("sed -n '" + a + "," + b + "p' " + file);
