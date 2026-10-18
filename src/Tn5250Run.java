@@ -265,12 +265,24 @@ public class Tn5250Run {
      */
     private Result runClSmart(String command) throws Exception {
         typeAtCommandLine(command);
-        waitStable(20000);
+        String t = waitStable(20000);
         Snapshot snap = snapshot();
         int inputs = 0;
         for (Boolean b : snap.fieldBypass) if (!b) inputs++;
+        // Temporary diagnostics (visible in backend logs): what the screen's
+        // fields actually look like, to ground the interactive rule in data.
+        StringBuilder dbg = new StringBuilder("runClSmart cmd=").append(command)
+                .append(" inputs=").append(inputs).append(" fields=");
+        for (int i = 0; i < snap.fieldPos.size(); i++) {
+            int[] p = snap.fieldPos.get(i);
+            dbg.append('[').append(p[0]).append(" r").append(p[1]).append(" c").append(p[2])
+               .append(" len").append(p[3]).append(" byp=").append(snap.fieldBypass.get(i)).append(']');
+        }
+        System.out.println(dbg);
+        boolean mainMenu = t.contains("IBM i Main Menu");
+        boolean interactiveText = t.contains("Type options, press Enter") || t.contains("Type choices, press Enter");
         Result r = new Result();
-        if (inputs >= 2) {
+        if (!mainMenu && (interactiveText || inputs >= 2)) {
             r.text = "(interactive screen)";
             r.interactive = snap;
             return r;
