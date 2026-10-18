@@ -102,14 +102,10 @@ public class Tn5250Run {
         Tn5250Run r = new Tn5250Run(session);
         try {
             session.connect();
-            // PUB400 first shows a Welcome banner screen; Enter leads to Sign On.
-            if (!r.waitFor("Sign On", 20000)) {
-                if (r.text().contains("Welcome")) {
-                    r.scr.sendKeys(KeyMnemonic.ENTER);
-                }
-                if (!r.waitFor("Sign On", 30000)) {
-                    throw new Exception("5250 sign-on screen did not appear. Last screen: " + trimBlock(r.text()));
-                }
+            // PUB400 uses a custom sign-on display ("Your user name:" /
+            // "Password (max. 128):") instead of the stock "Sign On" title.
+            if (!r.waitFor("Your user name:", 45000) && !r.waitFor("Sign On", 5000)) {
+                throw new Exception("5250 sign-on screen did not appear. Last screen: " + trimBlock(r.text()));
             }
             r.waitStable(5000);
             ScreenField[] f = r.scr.getScreenFields().getFields();
@@ -118,8 +114,13 @@ public class Tn5250Run {
             f[1].setString(password);
             r.scr.sendKeys(KeyMnemonic.ENTER);
             String after = r.waitStable(30000);
-            if (after.contains("Sign On")) {
-                String msg = lastNonBlank(after);
+            if (after.contains("Your user name:") || after.contains("Sign On")) {
+                String msg = "";
+                for (String line : after.split("\n")) {
+                    String t = line.trim();
+                    if (t.matches("(?i).*(CPF[0-9]{4}|incorrect|not correct|not valid|disabled|expired|error).*")) { msg = t; break; }
+                }
+                if (msg.isEmpty()) msg = lastNonBlank(after);
                 throw new AuthFail(msg.isEmpty() ? "Sign-on rejected by the host." : msg);
             }
             if (!after.contains("===>")) {
