@@ -1,3 +1,5 @@
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import org.tn5250j.Session5250;
 import org.tn5250j.SessionConfig;
@@ -10,7 +12,10 @@ import org.tn5250j.keyboard.KeyMnemonic;
  * Runs one command through a real IBM i 5250 (Telnet) session, the same
  * sign-on path a tn5250 emulator app uses: sign on, type the command at
  * the command line, page through display output, sign off.
- * SQL runs through QSH's db2 command inside the session.
+ *
+ * Results are returned as CLEAN WEB OUTPUT, not raw screens: SQL runs via
+ * QSH db2 redirected to a file and paged back line-chunk by line-chunk;
+ * CL display screens are captured without menu chrome and F-key legends.
  */
 public class Tn5250Run {
 
@@ -68,6 +73,11 @@ public class Tn5250Run {
         return text().contains(needle);
     }
 
+    private void sendLine(String s) {
+        scr.sendKeys(s);
+        scr.sendKeys(KeyMnemonic.ENTER);
+    }
+
     private static String lastNonBlank(String screenText) {
         String[] lines = screenText.split("\n");
         for (int i = lines.length - 1; i >= 0; i--) {
@@ -88,6 +98,114 @@ public class Tn5250Run {
             if (i < b - 1) sb.append('\n');
         }
         return sb.toString();
+    }
+
+    /** Extract just the command output from a QSH screen (no title, echo, prompt, or F-key lines). */
+    static String extractQsh(String screen) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : screen.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) continue;
+            if (t.equals("QSH Command Entry")) continue;
+            if (t.equals("$")) continue;
+            if (t.startsWith(">")) continue;
+            if (t.startsWith("===>")) continue;
+            if (t.contains("F3=Exit") || t.contains("F13=Clear") || t.contains("F21=CL")) continue;
+            sb.append(line.replaceAll("\\s+$", "")).append('\n');
+        }
+        return sb.toString().trim();
+    }
+
+    /** Drop F-key legend lines from a 5250 display screen. */
+    static String stripLegends(String screen) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : screen.split("\n")) {
+            String t = line.trim();
+            int legends = 0;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("F\\d{1,2}=").matcher(t);
+            while (m.find()) legends++;
+            if (legends >= 2) continue;
+            if (t.matches("^F\\d{1,2}=.*")) continue;
+            sb.append(line).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private String runSqlQsh(String command) throws Exception {
+        sendLine("QSH");
+        String qsh = waitStable(20000);
+        if (!qsh.contains("$")) {
+            throw new Exception("QSH did not start. Screen: " + trimBlock(qsh));
+        }
+        String sql = command.replace("\"", "").replace(";", "");
+        String file = "/tmp/ibridge_out.txt";
+        sendLine("db2 \"" + sql + "\" > " + file + " 2>&1");
+        waitStable(45000);
+        sendLine("wc -l < " + file);
+        String wcClean = extractQsh(waitStable(15000));
+        int total = -1;
+        java.util.regex.Matcher wm = java.util.regex.Pattern.compile("\\d+").matcher(wcClean);
+        if (wm.find()) {
+            try { total = Integer.parseInt(wm.group()); } catch (Exception ignore) {}
+        }
+        StringBuilder all = new StringBuilder();
+        if (total <= 0) {
+            all.append(extractQsh(text()));
+        } else {
+            int chunk = 16;
+            int cap = Math.min(total, 208);
+            for (int a = 1; a <= cap; a += chunk) {
+                int b = Math.min(a + chunk - 1, cap);
+                sendLine("sed -n '" + a + "," + b + "p' " + file);
+                String c = extractQsh(waitStable(15000));
+                if (!c.isEmpty()) {
+                    if (all.length() > 0) all.append('\n');
+                    all.append(c);
+                }
+            }
+            if (total > cap) all.append("\n... (").append(total - cap).append(" more lines not shown)");
+        }
+        sendLine("exit");
+        waitStable(10000);
+        String out = all.toString().trim();
+        return out.isEmpty() ? "(no output)" : out;
+    }
+
+    private String runCl(String command) throws Exception {
+        sendLine(command);
+        List<String> screens = new ArrayList<>();
+        String prev = "";
+        for (int i = 0; i < 10; i++) {
+            String t = waitStable(20000);
+            if (!t.equals(prev)) {
+                screens.add(t);
+                prev = t;
+            }
+            if (t.contains("===>")) break;
+            if (t.contains("Press ENTER to continue")) {
+                scr.sendKeys(KeyMnemonic.ENTER);
+            } else if (t.contains("F3=Exit")) {
+                scr.sendKeys(KeyMnemonic.PF3);
+            } else {
+                scr.sendKeys(KeyMnemonic.ENTER);
+            }
+        }
+        boolean hasDisplay = false;
+        for (String s : screens) {
+            if (!s.contains("IBM i Main Menu")) { hasDisplay = true; break; }
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String s : screens) {
+            boolean pureMenu = s.contains("IBM i Main Menu") && s.contains("Select one of the following");
+            if (pureMenu && hasDisplay && screens.size() > 1) continue;
+            String cleaned = trimBlock(stripLegends(s));
+            if (!cleaned.isEmpty()) {
+                if (sb.length() > 0) sb.append("\n");
+                sb.append(cleaned);
+            }
+        }
+        String out = sb.toString().trim();
+        return out.isEmpty() ? trimBlock(text()) : out;
     }
 
     public static String run(String host, String user, String password, String kind, String command) throws Exception {
@@ -127,44 +245,8 @@ public class Tn5250Run {
                 throw new Exception("Signed on, but no command line found. Last screen: " + trimBlock(after));
             }
 
-            StringBuilder transcript = new StringBuilder();
-            if ("sql".equals(kind)) {
-                r.scr.sendKeys("QSH");
-                r.scr.sendKeys(KeyMnemonic.ENTER);
-                String qsh = r.waitStable(20000);
-                if (!qsh.contains("$")) {
-                    throw new Exception("QSH did not start. Screen: " + trimBlock(qsh));
-                }
-                String sql = command.replace("\"", "");
-                r.scr.sendKeys("db2 \"" + sql + "\"");
-                r.scr.sendKeys(KeyMnemonic.ENTER);
-                String out = r.waitStable(45000);
-                transcript.append(trimBlock(out));
-                r.scr.sendKeys("exit");
-                r.scr.sendKeys(KeyMnemonic.ENTER);
-                r.waitStable(10000);
-            } else {
-                r.scr.sendKeys(command);
-                r.scr.sendKeys(KeyMnemonic.ENTER);
-                String prev = "";
-                for (int i = 0; i < 10; i++) {
-                    String t = r.waitStable(20000);
-                    if (!t.equals(prev)) {
-                        if (transcript.length() > 0) transcript.append("\n");
-                        transcript.append(trimBlock(t));
-                        prev = t;
-                    }
-                    if (t.contains("===>") && i > 0) break;
-                    if (t.contains("===>") && i == 0) break;
-                    if (t.contains("Press ENTER to continue")) {
-                        r.scr.sendKeys(KeyMnemonic.ENTER);
-                    } else if (t.contains("F3=Exit")) {
-                        r.scr.sendKeys(KeyMnemonic.PF3);
-                    } else {
-                        r.scr.sendKeys(KeyMnemonic.ENTER);
-                    }
-                }
-            }
+            String out = "sql".equals(kind) ? r.runSqlQsh(command) : r.runCl(command);
+
             // Sign off (best effort)
             try {
                 if (r.text().contains("===>")) {
@@ -173,8 +255,7 @@ public class Tn5250Run {
                     Thread.sleep(1000);
                 }
             } catch (Exception ignore) {}
-            String out = transcript.toString().trim();
-            return out.isEmpty() ? trimBlock(r.text()) : out;
+            return out;
         } finally {
             try { session.disconnect(); } catch (Exception ignore) {}
         }
