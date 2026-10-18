@@ -406,7 +406,7 @@ public class Tn5250Run {
         ScreenField[] fs = scr.getScreenFields().getFields();
         if (fs != null) {
             for (int i = 0; i < fs.length; i++) {
-                s.fieldPos.add(new int[]{i, fs[i].getCursorRow(), fs[i].getCursorCol(), fs[i].getLength()});
+                s.fieldPos.add(new int[]{i, fs[i].startRow(), fs[i].startCol(), fs[i].getLength()});
                 String v = fs[i].getString();
                 s.fieldVal.add(v == null ? "" : v);
                 s.fieldBypass.add(fs[i].isBypassField());
