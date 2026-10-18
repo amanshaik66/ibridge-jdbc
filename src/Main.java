@@ -59,6 +59,20 @@ public class Main {
             respond(ex, 422, err("Username and password are required.")); return;
         }
         if (command == null || command.trim().isEmpty()) { respond(ex, 422, err("Command is empty.")); return; }
+        String mode = jsonStr(body, "mode");
+        if ("5250".equals(mode)) {
+            try {
+                String out = Tn5250Run.run(host, username, password, kind, command.trim());
+                respond(ex, 200, "{\"ok\":true,\"via\":\"tn5250\",\"output\":" + jsonQuote(out) + "}");
+            } catch (Tn5250Run.AuthFail af) {
+                respond(ex, 502, "{\"ok\":false,\"auth\":true,\"message\":" + jsonQuote(String.valueOf(af.getMessage())) + "}");
+            } catch (Exception e) {
+                String msg = e.getMessage();
+                if (msg == null || msg.isBlank()) msg = e.getClass().getSimpleName();
+                respond(ex, 502, err("5250 session failed: " + msg));
+            }
+            return;
+        }
         try {
             String out = "cl".equals(kind)
                     ? runCl(host, username, password, command.trim())
