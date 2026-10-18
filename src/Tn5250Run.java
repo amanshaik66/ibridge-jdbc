@@ -78,6 +78,20 @@ public class Tn5250Run {
         scr.sendKeys(KeyMnemonic.ENTER);
     }
 
+    /**
+     * Type a command at a ===> command line. The host RETAINS the previous
+     * command text in that field when the menu redisplays (harmless in a
+     * fresh one-shot session, corrupting in a persistent session: the new
+     * command would overwrite only its own length and keep the old tail).
+     * HOME + ERASE_EOF clears the field first.
+     */
+    private void typeAtCommandLine(String s) {
+        scr.sendKeys(KeyMnemonic.HOME);
+        scr.sendKeys(KeyMnemonic.ERASE_EOF);
+        scr.sendKeys(s);
+        scr.sendKeys(KeyMnemonic.ENTER);
+    }
+
     private static String lastNonBlank(String screenText) {
         String[] lines = screenText.split("\n");
         for (int i = lines.length - 1; i >= 0; i--) {
@@ -196,7 +210,7 @@ public class Tn5250Run {
     }
 
     private String runSqlQsh(String command) throws Exception {
-        sendLine("QSH");
+        typeAtCommandLine("QSH");
         String qsh = waitStable(20000);
         if (!qsh.contains("$")) {
             throw new Exception("QSH did not start. Screen: " + trimBlock(qsh));
@@ -236,7 +250,7 @@ public class Tn5250Run {
     }
 
     private String runCl(String command) throws Exception {
-        sendLine(command);
+        typeAtCommandLine(command);
         List<String> screens = new ArrayList<>();
         String prev = "";
         for (int i = 0; i < 10; i++) {
