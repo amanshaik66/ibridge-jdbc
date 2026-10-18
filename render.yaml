@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ibridge-jdbc
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_KEY
+        value: ibridge_demo_key_2026
