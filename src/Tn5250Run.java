@@ -148,11 +148,14 @@ public class Tn5250Run {
         return cells;
     }
 
-    /** A run's result: clean text plus, for SQL, the parsed result table. */
+    /** A run's result: clean text plus, for SQL, the parsed result table.
+     *  When a CL command opens an interactive display, {@code interactive}
+     *  carries the live screen instead — the session stays on that screen. */
     public static class Result {
         public String text;
         public String[] columns;
         public java.util.List<String[]> rows;
+        public Snapshot interactive;
     }
 
     /**
@@ -251,6 +254,33 @@ public class Tn5250Run {
 
     private String runCl(String command) throws Exception {
         typeAtCommandLine(command);
+        return runClBody();
+    }
+
+    /**
+     * Session-mode CL: if the command opens an INTERACTIVE display (a screen
+     * with real input fields beyond the command line — WRKUSRJOB and kin),
+     * hand the live screen to the terminal instead of flattening it to text.
+     * Otherwise behave like a normal run and return the cleaned text.
+     */
+    private Result runClSmart(String command) throws Exception {
+        typeAtCommandLine(command);
+        waitStable(20000);
+        Snapshot snap = snapshot();
+        int inputs = 0;
+        for (Boolean b : snap.fieldBypass) if (!b) inputs++;
+        Result r = new Result();
+        if (inputs >= 2) {
+            r.text = "(interactive screen)";
+            r.interactive = snap;
+            return r;
+        }
+        r.text = runClBody();
+        return r;
+    }
+
+    /** Page through display output after a CL command was typed; returns cleaned text. */
+    private String runClBody() throws Exception {
         List<String> screens = new ArrayList<>();
         String prev = "";
         for (int i = 0; i < 10; i++) {
@@ -294,7 +324,7 @@ public class Tn5250Run {
     public static Result runEx(String host, String user, String password, String kind, String command) throws Exception {
         Tn5250Run r = open(host, user, password);
         try {
-            return r.runCommand(kind, command);
+            return r.runCommand(kind, command, false);
         } finally {
             r.close();
         }
@@ -425,7 +455,7 @@ public class Tn5250Run {
     }
 
     /** Run one command in this live session; the session stays signed on. */
-    public synchronized Result runCommand(String kind, String command) throws Exception {
+    public synchronized Result runCommand(String kind, String command, boolean sessionMode) throws Exception {
         // If the terminal left the session inside a display screen, back out
         // with PF3 (up to 3 screens) before expecting a command line.
         if (!text().contains("===>")) {
@@ -437,13 +467,17 @@ public class Tn5250Run {
                 throw new Exception("Session is inside a display screen with no command line. Use F3 in the terminal to exit it first.");
             }
         }
-        String out = "sql".equals(kind) ? runSqlQsh(command) : runCl(command);
         if ("sql".equals(kind)) {
+            String out = runSqlQsh(command);
             Result parsed = parseDb2(out);
             if (parsed != null) return parsed;
+            Result plain = new Result();
+            plain.text = out;
+            return plain;
         }
+        if (sessionMode) return runClSmart(command);
         Result plain = new Result();
-        plain.text = out;
+        plain.text = runCl(command);
         return plain;
     }
 

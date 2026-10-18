@@ -133,9 +133,13 @@ public class Main {
             return;
         }
         try {
-            Tn5250Run.Result res = s.conn.runCommand(kind == null ? "cl" : kind, command.trim());
+            Tn5250Run.Result res = s.conn.runCommand(kind == null ? "cl" : kind, command.trim(), true);
             s.lastUsed = System.currentTimeMillis();
-            respond(ex, 200, resultJson(res));
+            if (res.interactive != null) {
+                respond(ex, 200, "{\"ok\":true,\"via\":\"session\",\"interactive\":true,\"screen\":" + screenObjectJson(res.interactive) + "}");
+            } else {
+                respond(ex, 200, resultJson(res));
+            }
         } catch (Exception e) {
             // A failed run usually means the connection dropped: retire the session.
             if (SESSIONS.remove(token, s)) s.conn.close();
@@ -174,7 +178,11 @@ public class Main {
     }
 
     static String snapshotJson(Tn5250Run.Snapshot snap) {
-        StringBuilder jb = new StringBuilder("{\"ok\":true,\"screen\":{\"rows\":[");
+        return "{\"ok\":true,\"screen\":" + screenObjectJson(snap) + "}";
+    }
+
+    static String screenObjectJson(Tn5250Run.Snapshot snap) {
+        StringBuilder jb = new StringBuilder("{\"rows\":[");
         for (int i = 0; i < snap.rows.length; i++) {
             if (i > 0) jb.append(',');
             jb.append(jsonQuote(snap.rows[i]));
@@ -191,7 +199,7 @@ public class Main {
               .append(",\"bypass\":").append(snap.fieldBypass.get(i))
               .append('}');
         }
-        jb.append("]}}");
+        jb.append("]}");
         return jb.toString();
     }
 
