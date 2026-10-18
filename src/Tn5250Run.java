@@ -276,7 +276,22 @@ public class Tn5250Run {
         return runEx(host, user, password, kind, command).text;
     }
 
+    /** One-shot: open a session, run one command, sign off. */
     public static Result runEx(String host, String user, String password, String kind, String command) throws Exception {
+        Tn5250Run r = open(host, user, password);
+        try {
+            return r.runCommand(kind, command);
+        } finally {
+            r.close();
+        }
+    }
+
+    /**
+     * Connect and sign on, returning a live session that stays signed in
+     * (persistent-session mode). The password is used only for the sign-on
+     * and is not retained. Throws AuthFail on a sign-on rejection.
+     */
+    public static Tn5250Run open(String host, String user, String password) throws Exception {
         Properties props = new Properties();
         props.setProperty(TN5250jConstants.SESSION_HOST, host);
         props.setProperty(TN5250jConstants.SESSION_HOST_PORT, "23");
@@ -312,26 +327,34 @@ public class Tn5250Run {
             if (!after.contains("===>")) {
                 throw new Exception("Signed on, but no command line found. Last screen: " + trimBlock(after));
             }
-
-            String out = "sql".equals(kind) ? r.runSqlQsh(command) : r.runCl(command);
-
-            // Sign off (best effort)
-            try {
-                if (r.text().contains("===>")) {
-                    r.scr.sendKeys("SIGNOFF");
-                    r.scr.sendKeys(KeyMnemonic.ENTER);
-                    Thread.sleep(1000);
-                }
-            } catch (Exception ignore) {}
-            if ("sql".equals(kind)) {
-                Result parsed = parseDb2(out);
-                if (parsed != null) return parsed;
-            }
-            Result plain = new Result();
-            plain.text = out;
-            return plain;
-        } finally {
+            return r;
+        } catch (Exception e) {
             try { session.disconnect(); } catch (Exception ignore) {}
+            throw e;
         }
+    }
+
+    /** Run one command in this live session; the session stays signed on. */
+    public synchronized Result runCommand(String kind, String command) throws Exception {
+        String out = "sql".equals(kind) ? runSqlQsh(command) : runCl(command);
+        if ("sql".equals(kind)) {
+            Result parsed = parseDb2(out);
+            if (parsed != null) return parsed;
+        }
+        Result plain = new Result();
+        plain.text = out;
+        return plain;
+    }
+
+    /** Sign off and disconnect (best effort). */
+    public void close() {
+        try {
+            if (text().contains("===>")) {
+                scr.sendKeys("SIGNOFF");
+                scr.sendKeys(KeyMnemonic.ENTER);
+                Thread.sleep(1000);
+            }
+        } catch (Exception ignore) {}
+        try { session.disconnect(); } catch (Exception ignore) {}
     }
 }

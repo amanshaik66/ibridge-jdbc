@@ -30,15 +30,156 @@ public class Main {
     static final String APP_KEY = System.getenv().getOrDefault("APP_KEY", "ibridge_demo_key_2026");
     static final int MAX_CHARS = 20000;
 
+    // ---- Persistent 5250 sessions (stay signed in) ----
+    static final long SESSION_IDLE_MS = 10 * 60 * 1000L;
+    static final int MAX_SESSIONS = 20;
+
+    static class LiveSession {
+        final Tn5250Run conn;
+        volatile long lastUsed;
+        LiveSession(Tn5250Run c) { conn = c; lastUsed = System.currentTimeMillis(); }
+    }
+
+    static final java.util.concurrent.ConcurrentHashMap<String, LiveSession> SESSIONS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    static void sweepSessions() {
+        long now = System.currentTimeMillis();
+        SESSIONS.forEach((token, s) -> {
+            if (now - s.lastUsed > SESSION_IDLE_MS && SESSIONS.remove(token, s)) {
+                s.conn.close();
+                System.out.println("session expired: " + token.substring(0, 8));
+            }
+        });
+    }
+
     public static void main(String[] args) throws Exception {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         DriverManager.setLoginTimeout(25);
         HttpServer server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
         server.createContext("/health", ex -> respond(ex, 200, "{\"ok\":true}"));
         server.createContext("/run", Main::handleRun);
+        server.createContext("/session/open", Main::handleSessionOpen);
+        server.createContext("/session/run", Main::handleSessionRun);
+        server.createContext("/session/close", Main::handleSessionClose);
         server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
+        Thread sweeper = new Thread(() -> {
+            while (true) {
+                try { Thread.sleep(30_000); sweepSessions(); } catch (Exception ignore) {}
+            }
+        });
+        sweeper.setDaemon(true);
+        sweeper.start();
         System.out.println("ibridge-jdbc listening on " + port);
+    }
+
+    static String readBody(HttpExchange ex) throws IOException {
+        try (InputStream in = ex.getRequestBody()) { return new String(in.readAllBytes(), StandardCharsets.UTF_8); }
+    }
+
+    static boolean authed(HttpExchange ex) {
+        return APP_KEY.equals(ex.getRequestHeaders().getFirst("x-api-key"));
+    }
+
+    /** POST /session/open {host, username, password} -> {ok, session} */
+    static void handleSessionOpen(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, err("POST required.")); return; }
+        if (!authed(ex)) { respond(ex, 401, err("unauthorized")); return; }
+        String body = readBody(ex);
+        String host = jsonStr(body, "host");
+        String username = jsonStr(body, "username");
+        String password = jsonStr(body, "password");
+        if (host == null || !host.matches("[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?") || host.length() > 253) {
+            respond(ex, 422, err("Invalid host.")); return;
+        }
+        if (username == null || username.isEmpty() || password == null || password.isEmpty()) {
+            respond(ex, 422, err("Username and password are required.")); return;
+        }
+        if (SESSIONS.size() >= MAX_SESSIONS) { respond(ex, 503, err("Too many open sessions. Try again shortly.")); return; }
+        try {
+            Tn5250Run conn = Tn5250Run.open(host, username, password);
+            String token = java.util.UUID.randomUUID().toString();
+            SESSIONS.put(token, new LiveSession(conn));
+            respond(ex, 200, "{\"ok\":true,\"session\":" + jsonQuote(token) + "}");
+        } catch (Tn5250Run.AuthFail af) {
+            respond(ex, 502, "{\"ok\":false,\"auth\":true,\"message\":" + jsonQuote(String.valueOf(af.getMessage())) + "}");
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg != null && msg.length() > 1500) msg = msg.substring(0, 1500);
+            respond(ex, 502, err("5250 session failed: " + msg));
+        }
+    }
+
+    /** POST /session/run {session, kind, command} -> run inside the live session */
+    static void handleSessionRun(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, err("POST required.")); return; }
+        if (!authed(ex)) { respond(ex, 401, err("unauthorized")); return; }
+        String body = readBody(ex);
+        String token = jsonStr(body, "session");
+        String kind = jsonStr(body, "kind");
+        String command = jsonStr(body, "command");
+        if (command == null || command.trim().isEmpty()) { respond(ex, 422, err("Command is empty.")); return; }
+        LiveSession s = token == null ? null : SESSIONS.get(token);
+        if (s == null) {
+            respond(ex, 404, "{\"ok\":false,\"error\":\"session_expired\",\"message\":\"Session expired or not found. Sign in again.\"}");
+            return;
+        }
+        if (System.currentTimeMillis() - s.lastUsed > SESSION_IDLE_MS) {
+            if (SESSIONS.remove(token, s)) s.conn.close();
+            respond(ex, 404, "{\"ok\":false,\"error\":\"session_expired\",\"message\":\"Session expired. Sign in again.\"}");
+            return;
+        }
+        try {
+            Tn5250Run.Result res = s.conn.runCommand(kind == null ? "cl" : kind, command.trim());
+            s.lastUsed = System.currentTimeMillis();
+            respond(ex, 200, resultJson(res));
+        } catch (Exception e) {
+            // A failed run usually means the connection dropped: retire the session.
+            if (SESSIONS.remove(token, s)) s.conn.close();
+            String msg = e.getMessage();
+            if (msg != null && msg.length() > 1500) msg = msg.substring(0, 1500);
+            respond(ex, 502, "{\"ok\":false,\"error\":\"session_dead\",\"message\":" + jsonQuote("Session failed: " + msg) + "}");
+        }
+    }
+
+    /** POST /session/close {session} -> sign off now */
+    static void handleSessionClose(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) { respond(ex, 405, err("POST required.")); return; }
+        if (!authed(ex)) { respond(ex, 401, err("unauthorized")); return; }
+        String body = readBody(ex);
+        String token = jsonStr(body, "session");
+        if (token != null) {
+            LiveSession s = SESSIONS.remove(token);
+            if (s != null) s.conn.close();
+        }
+        respond(ex, 200, "{\"ok\":true}");
+    }
+
+    static String resultJson(Tn5250Run.Result res) {
+        StringBuilder jb = new StringBuilder("{\"ok\":true,\"via\":\"tn5250\",\"output\":");
+        jb.append(jsonQuote(res.text));
+        if (res.columns != null && res.rows != null) {
+            jb.append(",\"columns\":[");
+            for (int i = 0; i < res.columns.length; i++) {
+                if (i > 0) jb.append(',');
+                jb.append(jsonQuote(res.columns[i]));
+            }
+            jb.append("],\"rows\":[");
+            for (int ri = 0; ri < res.rows.size(); ri++) {
+                if (ri > 0) jb.append(',');
+                jb.append('[');
+                String[] row = res.rows.get(ri);
+                for (int ci = 0; ci < row.length; ci++) {
+                    if (ci > 0) jb.append(',');
+                    jb.append(jsonQuote(row[ci]));
+                }
+                jb.append(']');
+            }
+            jb.append(']');
+        }
+        jb.append('}');
+        return jb.toString();
     }
 
     static void handleRun(HttpExchange ex) throws IOException {
@@ -63,29 +204,7 @@ public class Main {
         if ("5250".equals(mode)) {
             try {
                 Tn5250Run.Result res = Tn5250Run.runEx(host, username, password, kind, command.trim());
-                StringBuilder jb = new StringBuilder("{\"ok\":true,\"via\":\"tn5250\",\"output\":");
-                jb.append(jsonQuote(res.text));
-                if (res.columns != null && res.rows != null) {
-                    jb.append(",\"columns\":[");
-                    for (int i = 0; i < res.columns.length; i++) {
-                        if (i > 0) jb.append(',');
-                        jb.append(jsonQuote(res.columns[i]));
-                    }
-                    jb.append("],\"rows\":[");
-                    for (int ri = 0; ri < res.rows.size(); ri++) {
-                        if (ri > 0) jb.append(',');
-                        jb.append('[');
-                        String[] row = res.rows.get(ri);
-                        for (int ci = 0; ci < row.length; ci++) {
-                            if (ci > 0) jb.append(',');
-                            jb.append(jsonQuote(row[ci]));
-                        }
-                        jb.append(']');
-                    }
-                    jb.append(']');
-                }
-                jb.append('}');
-                respond(ex, 200, jb.toString());
+                respond(ex, 200, resultJson(res));
             } catch (Tn5250Run.AuthFail af) {
                 respond(ex, 502, "{\"ok\":false,\"auth\":true,\"message\":" + jsonQuote(String.valueOf(af.getMessage())) + "}");
             } catch (Exception e) {
