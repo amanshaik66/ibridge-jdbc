@@ -62,8 +62,30 @@ public class Main {
         String mode = jsonStr(body, "mode");
         if ("5250".equals(mode)) {
             try {
-                String out = Tn5250Run.run(host, username, password, kind, command.trim());
-                respond(ex, 200, "{\"ok\":true,\"via\":\"tn5250\",\"output\":" + jsonQuote(out) + "}");
+                Tn5250Run.Result res = Tn5250Run.runEx(host, username, password, kind, command.trim());
+                StringBuilder jb = new StringBuilder("{\"ok\":true,\"via\":\"tn5250\",\"output\":");
+                jb.append(jsonQuote(res.text));
+                if (res.columns != null && res.rows != null) {
+                    jb.append(",\"columns\":[");
+                    for (int i = 0; i < res.columns.length; i++) {
+                        if (i > 0) jb.append(',');
+                        jb.append(jsonQuote(res.columns[i]));
+                    }
+                    jb.append("],\"rows\":[");
+                    for (int ri = 0; ri < res.rows.size(); ri++) {
+                        if (ri > 0) jb.append(',');
+                        jb.append('[');
+                        String[] row = res.rows.get(ri);
+                        for (int ci = 0; ci < row.length; ci++) {
+                            if (ci > 0) jb.append(',');
+                            jb.append(jsonQuote(row[ci]));
+                        }
+                        jb.append(']');
+                    }
+                    jb.append(']');
+                }
+                jb.append('}');
+                respond(ex, 200, jb.toString());
             } catch (Tn5250Run.AuthFail af) {
                 respond(ex, 502, "{\"ok\":false,\"auth\":true,\"message\":" + jsonQuote(String.valueOf(af.getMessage())) + "}");
             } catch (Exception e) {

@@ -100,20 +100,84 @@ public class Tn5250Run {
         return sb.toString();
     }
 
-    /** Extract just the command output from a QSH screen (no title, echo, prompt, or F-key lines). */
+    /**
+     * Extract just the latest command's output from a QSH screen: only the
+     * lines below the most recent ">" echo (older scrollback on the same
+     * screen, e.g. a wc count, must not leak into the result).
+     */
     static String extractQsh(String screen) {
+        String[] lines = screen.split("\n");
+        int start = 0;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].trim().startsWith(">")) start = i + 1;
+        }
         StringBuilder sb = new StringBuilder();
-        for (String line : screen.split("\n")) {
-            String t = line.trim();
+        for (int i = start; i < lines.length; i++) {
+            String t = lines[i].trim();
             if (t.isEmpty()) continue;
             if (t.equals("QSH Command Entry")) continue;
             if (t.equals("$")) continue;
-            if (t.startsWith(">")) continue;
             if (t.startsWith("===>")) continue;
             if (t.contains("F3=Exit") || t.contains("F13=Clear") || t.contains("F21=CL")) continue;
-            sb.append(line.replaceAll("\\s+$", "")).append('\n');
+            sb.append(lines[i].replaceAll("\\s+$", "")).append('\n');
         }
         return sb.toString().trim();
+    }
+
+    private static String[] sliceBySpans(String line, java.util.List<int[]> spans) {
+        String[] cells = new String[spans.size()];
+        for (int c = 0; c < spans.size(); c++) {
+            int a = spans.get(c)[0], b = spans.get(c)[1];
+            String pad = line.length() < b ? line + " ".repeat(b - line.length()) : line;
+            cells[c] = pad.substring(Math.min(a, pad.length()), Math.min(b, pad.length())).trim();
+        }
+        return cells;
+    }
+
+    /** A run's result: clean text plus, for SQL, the parsed result table. */
+    public static class Result {
+        public String text;
+        public String[] columns;
+        public java.util.List<String[]> rows;
+    }
+
+    /**
+     * Parse db2 CLI text output into columns/rows using the dashed separator
+     * line's column spans. Returns null when the text is not a result set
+     * (e.g. an SQL error message).
+     */
+    static Result parseDb2(String text) {
+        if (text == null) return null;
+        String[] lines = text.split("\n", -1);
+        int dashIdx = -1;
+        java.util.List<int[]> spans = null;
+        for (int i = 0; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.matches("^(-{3,}\\s+)*-{3,}\\s*$")) {
+                dashIdx = i;
+                spans = new ArrayList<>();
+                java.util.regex.Matcher m = java.util.regex.Pattern.compile("-+").matcher(lines[i]);
+                while (m.find()) spans.add(new int[]{m.start(), m.end()});
+                break;
+            }
+        }
+        if (dashIdx < 0 || spans == null || spans.isEmpty()) return null;
+        String header = null;
+        for (int i = dashIdx - 1; i >= 0; i--) {
+            if (!lines[i].trim().isEmpty()) { header = lines[i]; break; }
+        }
+        if (header == null) return null;
+        Result r = new Result();
+        r.text = text;
+        r.columns = sliceBySpans(header, spans);
+        r.rows = new ArrayList<>();
+        for (int i = dashIdx + 1; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.matches("^\\d+\\s+RECORD\\(S\\)\\s+SELECTED\\.?$")) break;
+            if (t.isEmpty()) continue;
+            r.rows.add(sliceBySpans(lines[i], spans));
+        }
+        return r;
     }
 
     /** Drop F-key legend lines from a 5250 display screen. */
@@ -209,6 +273,10 @@ public class Tn5250Run {
     }
 
     public static String run(String host, String user, String password, String kind, String command) throws Exception {
+        return runEx(host, user, password, kind, command).text;
+    }
+
+    public static Result runEx(String host, String user, String password, String kind, String command) throws Exception {
         Properties props = new Properties();
         props.setProperty(TN5250jConstants.SESSION_HOST, host);
         props.setProperty(TN5250jConstants.SESSION_HOST_PORT, "23");
@@ -255,7 +323,13 @@ public class Tn5250Run {
                     Thread.sleep(1000);
                 }
             } catch (Exception ignore) {}
-            return out;
+            if ("sql".equals(kind)) {
+                Result parsed = parseDb2(out);
+                if (parsed != null) return parsed;
+            }
+            Result plain = new Result();
+            plain.text = out;
+            return plain;
         } finally {
             try { session.disconnect(); } catch (Exception ignore) {}
         }
