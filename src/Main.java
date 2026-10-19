@@ -141,11 +141,15 @@ public class Main {
                 respond(ex, 200, resultJson(res));
             }
         } catch (Exception e) {
-            // A failed run usually means the connection dropped: retire the session.
-            if (SESSIONS.remove(token, s)) s.conn.close();
+            // Keep the session alive: most run failures are screen-state
+            // issues (a mistimed paint, a leftover display screen) that the
+            // next run's recovery handles. Retiring the session on any
+            // failure turned a single glitch into a forced re-sign-in and
+            // made every later call in the session fail too.
+            s.lastUsed = System.currentTimeMillis();
             String msg = e.getMessage();
             if (msg != null && msg.length() > 1500) msg = msg.substring(0, 1500);
-            respond(ex, 502, "{\"ok\":false,\"error\":\"session_dead\",\"message\":" + jsonQuote("Session failed: " + msg) + "}");
+            respond(ex, 502, "{\"ok\":false,\"error\":\"run_failed\",\"message\":" + jsonQuote("Run failed: " + msg) + "}");
         }
     }
 

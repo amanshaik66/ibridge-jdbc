@@ -73,6 +73,21 @@ public class Tn5250Run {
         return text().contains(needle);
     }
 
+    /**
+     * Wait until the screen content changes from {@code before} (or timeout).
+     * A plain stability wait can return in the dead gap between sending ENTER
+     * and the host painting the response screen — the pre-key screen looks
+     * "stable" — so after sending keys we first require a change.
+     */
+    private boolean waitChanged(String before, long timeoutMs) throws Exception {
+        long end = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < end) {
+            if (!text().equals(before)) return true;
+            Thread.sleep(200);
+        }
+        return !text().equals(before);
+    }
+
     private void sendLine(String s) {
         scr.sendKeys(s);
         scr.sendKeys(KeyMnemonic.ENTER);
@@ -214,10 +229,13 @@ public class Tn5250Run {
 
     private String runSqlQsh(String command) throws Exception {
         typeAtCommandLine("QSH");
-        String qsh = waitStable(20000);
-        if (!qsh.contains("$")) {
-            throw new Exception("QSH did not start. Screen: " + trimBlock(qsh));
+        // Wait FOR the QSH prompt itself (the "$"), not mere stability: the
+        // menu screen is perfectly "stable" in the gap before QSH paints,
+        // which made repeat SQL runs in a session fail with "did not start".
+        if (!waitFor("$", 30000)) {
+            throw new Exception("QSH did not start. Screen: " + trimBlock(text()));
         }
+        waitStable(5000);
         String sql = command.replace("\"", "").replace(";", "");
         String file = "/tmp/ibridge_out.txt";
         sendLine("db2 \"" + sql + "\" > " + file + " 2>&1");
@@ -253,7 +271,9 @@ public class Tn5250Run {
     }
 
     private String runCl(String command) throws Exception {
+        String before = text();
         typeAtCommandLine(command);
+        waitChanged(before, 8000);
         return runClBody();
     }
 
@@ -264,7 +284,9 @@ public class Tn5250Run {
      * Otherwise behave like a normal run and return the cleaned text.
      */
     private Result runClSmart(String command) throws Exception {
+        String before = text();
         typeAtCommandLine(command);
+        waitChanged(before, 8000);
         String t = waitStable(20000);
         Snapshot snap = snapshot();
         int inputs = 0;
@@ -369,7 +391,9 @@ public class Tn5250Run {
             if (f == null || f.length < 2) throw new Exception("Sign-on fields not found.");
             f[0].setString(user);
             f[1].setString(password);
+            String signonScreen = r.text();
             r.scr.sendKeys(KeyMnemonic.ENTER);
+            r.waitChanged(signonScreen, 20000);
             String after = r.waitStable(30000);
             if (after.contains("Your user name:") || after.contains("Sign On")) {
                 String msg = "";
@@ -461,13 +485,22 @@ public class Tn5250Run {
                 }
             }
         }
+        String before = text();
         scr.sendKeys(mnemonic(aid));
-        waitStable(20000);
+        waitChanged(before, 5000);
+        waitStable(12000);
         return snapshot();
     }
 
     /** Run one command in this live session; the session stays signed on. */
     public synchronized Result runCommand(String kind, String command, boolean sessionMode) throws Exception {
+        // If a previous run left the session inside QSH, exit back to the OS
+        // command line first (the QSH screen carries an ===> line of its own,
+        // which would fool the check below).
+        if (text().contains("QSH Command Entry")) {
+            sendLine("exit");
+            waitStable(10000);
+        }
         // If the terminal left the session inside a display screen, back out
         // with PF3 (up to 3 screens) before expecting a command line.
         if (!text().contains("===>")) {
