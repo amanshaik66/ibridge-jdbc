@@ -227,6 +227,28 @@ public class Tn5250Run {
         return sb.toString();
     }
 
+    /**
+     * Wait until QSH prints our completion sentinel. A db2 query's own screen
+     * output is redirected to a file, so the screen sits perfectly still while
+     * a slow query runs — a plain stability wait returns in under a second and
+     * the old code then read an unfinished (or not yet created) file, which
+     * surfaced as "(no output)". The sentinel is printed by the same shell
+     * command line only after db2 exits, so this waits for real completion.
+     * Matches ^DONE-<digits>$ on a full line, so the typed echo itself
+     * ("echo DONE-$?") can never false-positive.
+     */
+    private boolean waitForDone(long timeoutMs) {
+        long end = System.currentTimeMillis() + timeoutMs;
+        java.util.regex.Pattern done = java.util.regex.Pattern.compile("^DONE-\\d+$");
+        while (true) {
+            for (String line : text().split("\n")) {
+                if (done.matcher(line.trim()).matches()) return true;
+            }
+            if (System.currentTimeMillis() >= end) return false;
+            try { Thread.sleep(500); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return false; }
+        }
+    }
+
     private String runSqlQsh(String command) throws Exception {
         typeAtCommandLine("QSH");
         // Wait FOR the QSH prompt itself (the "$"), not mere stability: the
@@ -238,9 +260,20 @@ public class Tn5250Run {
         waitStable(5000);
         String sql = command.replace("\"", "").replace(";", "");
         String file = "/tmp/ibridge_out.txt";
-        sendLine("db2 \"" + sql + "\" > " + file + " 2>&1");
-        waitStable(45000);
+        // The sentinel prints only after db2 exits: the screen is static while
+        // a slow query (e.g. SYSTEM_STATUS_INFO) runs, so a stability wait
+        // alone returns almost immediately and reads a not-yet-written file.
+        String beforeDb2 = text();
+        sendLine("db2 \"" + sql + "\" > " + file + " 2>&1; echo DONE-$?");
+        waitChanged(beforeDb2, 15000);
+        if (!waitForDone(180000)) {
+            throw new Exception("db2 did not finish within 180s. Screen: " + trimBlock(text()));
+        }
+        String beforeWc = text();
         sendLine("wc -l < " + file);
+        // waitChanged first: a stability wait alone can return in the dead gap
+        // between ENTER and the host painting, re-reading the previous chunk.
+        waitChanged(beforeWc, 15000);
         String wcClean = extractQsh(waitStable(15000));
         int total = -1;
         java.util.regex.Matcher wm = java.util.regex.Pattern.compile("\\d+").matcher(wcClean);
@@ -255,7 +288,9 @@ public class Tn5250Run {
             int cap = Math.min(total, 245);
             for (int a = 1; a <= cap; a += chunk) {
                 int b = Math.min(a + chunk - 1, cap);
+                String beforeSed = text();
                 sendLine("sed -n '" + a + "," + b + "p' " + file);
+                waitChanged(beforeSed, 15000);
                 String c = extractQsh(waitStable(15000));
                 if (!c.isEmpty()) {
                     if (all.length() > 0) all.append('\n');
