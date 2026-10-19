@@ -430,6 +430,27 @@ public class Tn5250Run {
             r.scr.sendKeys(KeyMnemonic.ENTER);
             r.waitChanged(signonScreen, 20000);
             String after = r.waitStable(30000);
+            // Between sign-on and the initial menu, IBM i may interpose a
+            // Display Program Messages screen (messages waiting in the user's
+            // message queue) or a "Press ENTER to continue" screen. Step
+            // through those — ENTER first, PF3 if ENTER doesn't move it —
+            // bounded, until a command line appears or the screen turns out
+            // to be something we don't recognize.
+            for (int steps = 0; steps < 6 && !after.contains("===>")
+                    && !after.contains("Your user name:") && !after.contains("Sign On"); steps++) {
+                boolean steppable = after.contains("Display Program Messages")
+                        || after.contains("Display Messages")
+                        || after.contains("Press ENTER to continue")
+                        || after.contains("Press Enter to continue");
+                if (!steppable) break;
+                String beforeStep = after;
+                r.scr.sendKeys(KeyMnemonic.ENTER);
+                if (!r.waitChanged(beforeStep, 8000)) {
+                    r.scr.sendKeys(KeyMnemonic.PF3);
+                    r.waitChanged(beforeStep, 8000);
+                }
+                after = r.waitStable(15000);
+            }
             if (after.contains("Your user name:") || after.contains("Sign On")) {
                 String msg = "";
                 for (String line : after.split("\n")) {
