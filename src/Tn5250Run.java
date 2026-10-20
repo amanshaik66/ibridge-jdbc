@@ -185,7 +185,9 @@ public class Tn5250Run {
         java.util.List<int[]> spans = null;
         for (int i = 0; i < lines.length; i++) {
             String t = lines[i].trim();
-            if (t.matches("^(-{2,}\\s+)*-{2,}\\s*$")) {
+            // Single-dash groups are real (a 1-wide column, e.g. QCUSTCDT's
+            // CHGCOD) — requiring 2+ dashes made such tables unparseable.
+            if (t.matches("^(-+\\s+)*-+\\s*$")) {
                 dashIdx = i;
                 spans = new ArrayList<>();
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("-+").matcher(lines[i]);
@@ -199,9 +201,30 @@ public class Tn5250Run {
             if (!lines[i].trim().isEmpty()) { header = lines[i]; break; }
         }
         if (header == null) return null;
+        // db2 offsets the separator line a few columns right of the header
+        // (observed +3 on PUB400: values and dashes align, header names sit
+        // left of their dash groups — slicing the header by the raw spans
+        // eats the first ~3 chars of every column name). Find the small
+        // shift k that makes every header slice land exactly on one token;
+        // column names use the shifted spans, data rows keep the raw spans
+        // (the values align with the dashes, not the header).
+        int bestK = 0, bestDirty = Integer.MAX_VALUE;
+        for (int k = 0; k <= 6; k++) {
+            int dirty = 0;
+            for (int[] sp : spans) {
+                int a = Math.max(0, sp[0] - k), b = Math.max(a, sp[1] - k);
+                String pad = header.length() < b ? header + " ".repeat(b - header.length()) : header;
+                String cell = pad.substring(a, Math.min(b, pad.length())).trim();
+                if (cell.isEmpty() || cell.contains(" ")) dirty++;
+            }
+            if (dirty < bestDirty) { bestDirty = dirty; bestK = k; }
+            if (dirty == 0) break;
+        }
+        java.util.List<int[]> headerSpans = new ArrayList<>();
+        for (int[] sp : spans) headerSpans.add(new int[]{Math.max(0, sp[0] - bestK), Math.max(0, sp[1] - bestK)});
         Result r = new Result();
         r.text = text;
-        r.columns = sliceBySpans(header, spans);
+        r.columns = sliceBySpans(header, headerSpans);
         r.rows = new ArrayList<>();
         for (int i = dashIdx + 1; i < lines.length; i++) {
             String t = lines[i].trim();
@@ -271,16 +294,24 @@ public class Tn5250Run {
         if (!waitForDone(180000)) {
             throw new Exception("db2 did not finish within 180s. Screen: " + trimBlock(text()));
         }
-        String beforeWc = text();
-        sendLine("wc -l < " + file);
-        // waitChanged first: a stability wait alone can return in the dead gap
-        // between ENTER and the host painting, re-reading the previous chunk.
-        waitChanged(beforeWc, 15000);
-        String wcClean = extractQsh(waitStable(15000));
         int total = -1;
-        java.util.regex.Matcher wm = java.util.regex.Pattern.compile("\\d+").matcher(wcClean);
-        if (wm.find()) {
-            try { total = Integer.parseInt(wm.group()); } catch (Exception ignore) {}
+        for (int attempt = 0; attempt < 2 && total <= 0; attempt++) {
+            String beforeWc = text();
+            sendLine("wc -l < " + file);
+            // waitChanged first: a stability wait alone can return in the dead
+            // gap between ENTER and the host painting, re-reading stale text.
+            waitChanged(beforeWc, 15000);
+            String wcClean = extractQsh(waitStable(15000));
+            // The count is the LAST integer on the extracted screen (the wc
+            // output sits below its echo and any scrollback digits), and a
+            // misread here truncates the whole read — so retry once.
+            java.util.regex.Matcher wm = java.util.regex.Pattern.compile("\\d+").matcher(wcClean);
+            String lastNum = null;
+            while (wm.find()) lastNum = wm.group();
+            if (lastNum != null) {
+                try { total = Integer.parseInt(lastNum); } catch (Exception ignore) {}
+            }
+            if (total > 100000) total = -1;
         }
         StringBuilder all = new StringBuilder();
         if (total <= 0) {
@@ -325,11 +356,13 @@ public class Tn5250Run {
      * take minutes and serialize the whole session behind it).
      */
     private java.util.List<String> readResultLines(String file, int cap) throws Exception {
-        // Probe with the first 7 lines only: a wrapped logical line takes two
-        // screen rows, and 7 lines is the largest chunk whose wrapped output
-        // provably stays on the 24-row QSH display (a 15-line chunk scrolled
-        // and silently lost its first lines — observed live 2026-10-20).
-        java.util.List<String> head = readFileChunk(file, 1, Math.min(7, cap), false);
+        // Probe with the first 3 lines only: a wrapped logical line takes one
+        // screen row per 80 chars, so even the 7-line chunk overflows the
+        // 24-row QSH display on very wide results (a ~180-char libraries row
+        // is 3 rows; 7 lines x 3 rows + chrome scrolls the header off —
+        // observed live 2026-10-20, detection then never fired). 3 lines is
+        // safe up to ~7 rows per line (~560 chars).
+        java.util.List<String> head = readFileChunk(file, 1, Math.min(3, cap), false);
         if (head.size() < 2) return readFileLegacy(file, cap);
         // The separator line is the first all-dashes line — NOT necessarily
         // line 2: a wide result's HEADER wraps too, so the separator can sit
@@ -341,7 +374,7 @@ public class Tn5250Run {
         }
         if (!overflow) {
             java.util.List<String> allLines = new ArrayList<>(head);
-            for (int a = 8; a <= cap; a += 7) {
+            for (int a = 4; a <= cap; a += 7) {
                 int b = Math.min(a + 6, cap);
                 allLines.addAll(readFileChunk(file, a, b, false));
             }
