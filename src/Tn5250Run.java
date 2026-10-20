@@ -325,14 +325,24 @@ public class Tn5250Run {
      * take minutes and serialize the whole session behind it).
      */
     private java.util.List<String> readResultLines(String file, int cap) throws Exception {
-        java.util.List<String> head = readFileChunk(file, 1, Math.min(15, cap), false);
+        // Probe with the first 7 lines only: a wrapped logical line takes two
+        // screen rows, and 7 lines is the largest chunk whose wrapped output
+        // provably stays on the 24-row QSH display (a 15-line chunk scrolled
+        // and silently lost its first lines — observed live 2026-10-20).
+        java.util.List<String> head = readFileChunk(file, 1, Math.min(7, cap), false);
         if (head.size() < 2) return readFileLegacy(file, cap);
-        String dash = head.get(1);
-        boolean overflow = dash.length() >= 78 && dash.matches("^[- ]+$");
+        // The separator line is the first all-dashes line — NOT necessarily
+        // line 2: a wide result's HEADER wraps too, so the separator can sit
+        // at index 2+. It counts as overflow when a fragment reaches the
+        // screen edge (a narrower separator means the whole line fit).
+        boolean overflow = false;
+        for (String ln : head) {
+            if (ln.matches("^[- ]+$")) { overflow = ln.length() >= 78; break; }
+        }
         if (!overflow) {
             java.util.List<String> allLines = new ArrayList<>(head);
-            for (int a = 16; a <= cap; a += 15) {
-                int b = Math.min(a + 14, cap);
+            for (int a = 8; a <= cap; a += 7) {
+                int b = Math.min(a + 6, cap);
                 allLines.addAll(readFileChunk(file, a, b, false));
             }
             return allLines;
@@ -348,8 +358,11 @@ public class Tn5250Run {
             waitStable(8000);
             java.util.List<String> sliceLines = new ArrayList<>();
             boolean okSlice = true;
-            for (int a = 1; a <= cap; a += 15) {
-                int b = Math.min(a + 14, cap);
+            // Slice lines never wrap (<=72 chars), so a chunk of 12 fits the
+            // display with its chrome; the row-count check convicts any
+            // chunk size that ever overflows.
+            for (int a = 1; a <= cap; a += 12) {
+                int b = Math.min(a + 11, cap);
                 java.util.List<String> rows = readFileChunk(sliceFile, a, b, true);
                 if (rows == null || rows.size() != b - a + 1) { okSlice = false; break; }
                 sliceLines.addAll(rows);
