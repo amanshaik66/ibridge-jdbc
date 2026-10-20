@@ -390,7 +390,7 @@ public class Tn5250Run {
         final int sliceW = 72;
         String sliceFile = "/tmp/ibridge_slice.txt";
         java.util.List<java.util.List<String>> slices = new ArrayList<>();
-        for (int s = 0; s < 8; s++) {
+        for (int s = 0; s < 16; s++) {
             int lo = s * sliceW + 1, hi = lo + sliceW - 1;
             String beforeCut = text();
             sendLine("cut -c" + lo + "-" + hi + " " + file + " > " + sliceFile);
@@ -427,6 +427,12 @@ public class Tn5250Run {
             for (int s = 0; s < slices.size(); s++) {
                 java.util.List<String> sl = slices.get(s);
                 String part = i < sl.size() ? sl.get(i) : "";
+                // QSH prints command output with a 3-column gutter, so a
+                // slice's 72 content chars sit at row columns [3,75).
+                // Reading [0,72) drops the slice's last 3 content chars at
+                // every seam — 3-space holes that split separator dash
+                // groups and spawn phantom blank columns.
+                if (part.length() > 3) part = part.substring(3);
                 if (s < slices.size() - 1) {
                     if (part.length() > sliceW) part = part.substring(0, sliceW);
                     while (part.length() < sliceW) part = part + " ";
