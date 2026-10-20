@@ -215,7 +215,14 @@ public class Tn5250Run {
                 int a = Math.max(0, sp[0] - k), b = Math.max(a, sp[1] - k);
                 String pad = header.length() < b ? header + " ".repeat(b - header.length()) : header;
                 String cell = pad.substring(a, Math.min(b, pad.length())).trim();
-                if (cell.isEmpty() || cell.contains(" ")) dirty++;
+                // Clean = exactly one whole token: non-empty, no inner
+                // space, and bounded by spaces/line edges on BOTH sides.
+                // (Interior slices of a token are also space-free — without
+                // the boundary checks the search stops one shift early and
+                // every header loses its first character.)
+                boolean bounded = (a == 0 || pad.charAt(a - 1) == ' ')
+                        && (b >= pad.length() || pad.charAt(b) == ' ');
+                if (cell.isEmpty() || cell.contains(" ") || !bounded) dirty++;
             }
             if (dirty < bestDirty) { bestDirty = dirty; bestK = k; }
             if (dirty == 0) break;
@@ -401,9 +408,18 @@ public class Tn5250Run {
                 sliceLines.addAll(rows);
             }
             if (!okSlice) return readFileLegacy(file, cap);
+            // A slice past the widest line reads back all blank (cut emits
+            // empty lines there) — discard it and stop. Do NOT stop just
+            // because a slice's separator fragment trims short: a fragment
+            // can end inside an inter-column gap while more columns follow
+            // (that early stop silently dropped trailing columns).
+            boolean blank = true;
+            for (String row : sliceLines) if (!row.trim().isEmpty()) { blank = false; break; }
+            if (blank) {
+                if (slices.isEmpty()) return readFileLegacy(file, cap);
+                break;
+            }
             slices.add(sliceLines);
-            String d = sliceLines.size() > 1 ? sliceLines.get(1) : "";
-            if (d.replaceAll("\\s+$", "").length() < sliceW) break;
         }
         java.util.List<String> out = new ArrayList<>();
         for (int i = 0; i < cap; i++) {
