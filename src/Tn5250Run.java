@@ -206,6 +206,8 @@ public class Tn5250Run {
         for (int i = dashIdx + 1; i < lines.length; i++) {
             String t = lines[i].trim();
             if (t.matches("^\\d+\\s+RECORD\\(S\\)\\s+SELECTED\\.?$")) break;
+            if (t.startsWith("... (")) break;
+            if (t.matches("^\\(\\d+ more lines not shown\\)\\.?$")) break;
             if (t.isEmpty()) continue;
             r.rows.add(sliceBySpans(lines[i], spans));
         }
@@ -284,25 +286,153 @@ public class Tn5250Run {
         if (total <= 0) {
             all.append(extractQsh(text()));
         } else {
-            int chunk = 7;
             int cap = Math.min(total, 245);
-            for (int a = 1; a <= cap; a += chunk) {
-                int b = Math.min(a + chunk - 1, cap);
-                String beforeSed = text();
-                sendLine("sed -n '" + a + "," + b + "p' " + file);
-                waitChanged(beforeSed, 15000);
-                String c = extractQsh(waitStable(15000));
-                if (!c.isEmpty()) {
+            java.util.List<String> lines = readResultLines(file, cap);
+            if (lines == null) {
+                all.append(extractQsh(text()));
+            } else {
+                for (String ln : lines) {
                     if (all.length() > 0) all.append('\n');
-                    all.append(c);
+                    all.append(ln);
                 }
+                if (total > cap) all.append("\n... (").append(total - cap).append(" more lines not shown)");
             }
-            if (total > cap) all.append("\n... (").append(total - cap).append(" more lines not shown)");
         }
         sendLine("exit");
         waitStable(10000);
         String out = all.toString().trim();
         return out.isEmpty() ? "(no output)" : out;
+    }
+
+    /**
+     * Read the db2 result file's lines (1..cap) back through the QSH screen.
+     *
+     * The screen is 80 columns wide, and db2 pads every column to its
+     * DECLARED width, so most real result sets are wider than 80 chars per
+     * line (a two-column SYSSCHEMAS row is ~180: SCHEMA_NAME is VARCHAR(128)).
+     * Reading such a file straight through the screen wraps every line and
+     * shreds the table — the parser then sees separator fragments and phantom
+     * rows (observed live: jobs/status tables garbled, QCUSTCDT counting 23
+     * rows for 12). So: if the separator line (line 2) reaches the screen
+     * edge, the result is re-read in vertical slices — `cut -c` column
+     * ranges, each narrow enough to cross the screen intact — and the slices
+     * are stitched back into logical lines by index (cut preserves line
+     * counts 1:1). Any inconsistency (row-count mismatch, missing cut) falls
+     * back to the legacy single-pass read, so worst case is today's
+     * behavior. Narrow results keep a single pass, just with a larger chunk
+     * (15 lines fits the 24-row screen with echo and prompt, and roughly
+     * halves the old 7-line loop's round trips — a 245-line read used to
+     * take minutes and serialize the whole session behind it).
+     */
+    private java.util.List<String> readResultLines(String file, int cap) throws Exception {
+        java.util.List<String> head = readFileChunk(file, 1, Math.min(15, cap), false);
+        if (head.size() < 2) return readFileLegacy(file, cap);
+        String dash = head.get(1);
+        boolean overflow = dash.length() >= 78 && dash.matches("^[- ]+$");
+        if (!overflow) {
+            java.util.List<String> allLines = new ArrayList<>(head);
+            for (int a = 16; a <= cap; a += 15) {
+                int b = Math.min(a + 14, cap);
+                allLines.addAll(readFileChunk(file, a, b, false));
+            }
+            return allLines;
+        }
+        final int sliceW = 72;
+        String sliceFile = "/tmp/ibridge_slice.txt";
+        java.util.List<java.util.List<String>> slices = new ArrayList<>();
+        for (int s = 0; s < 8; s++) {
+            int lo = s * sliceW + 1, hi = lo + sliceW - 1;
+            String beforeCut = text();
+            sendLine("cut -c" + lo + "-" + hi + " " + file + " > " + sliceFile);
+            waitChanged(beforeCut, 15000);
+            waitStable(8000);
+            java.util.List<String> sliceLines = new ArrayList<>();
+            boolean okSlice = true;
+            for (int a = 1; a <= cap; a += 15) {
+                int b = Math.min(a + 14, cap);
+                java.util.List<String> rows = readFileChunk(sliceFile, a, b, true);
+                if (rows == null || rows.size() != b - a + 1) { okSlice = false; break; }
+                sliceLines.addAll(rows);
+            }
+            if (!okSlice) return readFileLegacy(file, cap);
+            slices.add(sliceLines);
+            String d = sliceLines.size() > 1 ? sliceLines.get(1) : "";
+            if (d.replaceAll("\\s+$", "").length() < sliceW) break;
+        }
+        java.util.List<String> out = new ArrayList<>();
+        for (int i = 0; i < cap; i++) {
+            StringBuilder sb = new StringBuilder();
+            for (int s = 0; s < slices.size(); s++) {
+                java.util.List<String> sl = slices.get(s);
+                String part = i < sl.size() ? sl.get(i) : "";
+                if (s < slices.size() - 1) {
+                    if (part.length() > sliceW) part = part.substring(0, sliceW);
+                    while (part.length() < sliceW) part = part + " ";
+                } else {
+                    part = part.replaceAll("\\s+$", "");
+                }
+                sb.append(part);
+            }
+            out.add(sb.toString());
+        }
+        return out;
+    }
+
+    /** The original single-pass read (7-line chunks, extractQsh text). */
+    private java.util.List<String> readFileLegacy(String file, int cap) throws Exception {
+        java.util.List<String> outLines = new ArrayList<>();
+        for (int a = 1; a <= cap; a += 7) {
+            int b = Math.min(a + 6, cap);
+            outLines.addAll(readFileChunk(file, a, b, false));
+        }
+        return outLines;
+    }
+
+    /**
+     * Read lines a..b of a file in QSH via sed. In raw mode returns the full
+     * 80-char screen rows (no trimming, blank rows kept, bounded by the "$"
+     * prompt) so callers can verify the exact row count; null when the
+     * screen never settles enough to extract.
+     */
+    private java.util.List<String> readFileChunk(String file, int a, int b, boolean raw) throws Exception {
+        String beforeSed = text();
+        sendLine("sed -n '" + a + "," + b + "p' " + file);
+        waitChanged(beforeSed, 15000);
+        String stable = waitStable(15000);
+        if (!raw) {
+            String c = extractQsh(stable);
+            java.util.List<String> lines = new ArrayList<>();
+            if (!c.isEmpty()) for (String ln : c.split("\n")) lines.add(ln);
+            return lines;
+        }
+        java.util.List<String> rows = extractQshRows(stable);
+        if (rows.size() != b - a + 1) {
+            // The screen may still be painting; settle once more and retry.
+            rows = extractQshRows(waitStable(6000));
+        }
+        return rows;
+    }
+
+    /**
+     * Raw QSH screen rows below the most recent ">" echo, stopping at the
+     * "$" prompt row: the output block, untrimmed and with blank rows kept
+     * (a blank row inside a cut slice is real padding, not chrome).
+     */
+    static java.util.List<String> extractQshRows(String screen) {
+        String[] lines = screen.split("\n", -1);
+        int start = 0;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].trim().startsWith(">")) start = i + 1;
+        }
+        java.util.List<String> out = new ArrayList<>();
+        for (int i = start; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.equals("$")) break;
+            if (t.equals("QSH Command Entry")) continue;
+            if (t.contains("F3=Exit") || t.contains("F13=Clear") || t.contains("F21=CL")) break;
+            out.add(lines[i]);
+        }
+        return out;
     }
 
     private String runCl(String command) throws Exception {
