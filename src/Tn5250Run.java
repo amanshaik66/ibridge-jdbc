@@ -378,6 +378,20 @@ public class Tn5250Run {
         for (String ln : head) {
             if (ln.matches("^[- ]+$")) { overflow = ln.length() >= 78; break; }
         }
+        if (!overflow && cap >= 2) {
+            // Stage 2, only when the head probe saw no overflow: an
+            // ultra-wide result (~700 chars, e.g. SELECT * on
+            // SYSTEM_STATUS_INFO) wraps its header into ~9 screen rows, so
+            // the separator's first fragment can sit BELOW the 3-line
+            // probe's extracted window and stage 1 misses it. Read the
+            // separator line alone — any all-dashes fragment of 78+ chars
+            // proves the wrap. Narrow results fit line 2 on one row, so
+            // this cannot false-positive.
+            java.util.List<String> sep = readFileChunk(file, 2, 2, false);
+            for (String ln : sep) {
+                if (ln.matches("^[- ]+$") && ln.length() >= 78) { overflow = true; break; }
+            }
+        }
         if (!overflow) {
             java.util.List<String> allLines = new ArrayList<>(head);
             for (int a = 4; a <= cap; a += 7) {
