@@ -363,16 +363,12 @@ public class Tn5250Run {
      * take minutes and serialize the whole session behind it).
      */
     private java.util.List<String> readResultLines(String file, int cap) throws Exception {
-        // Probe with the first 2 lines only (header + separator — all the
-        // width detection needs): a wrapped logical line takes one screen
-        // row per 80 chars, so wider probes overflow the 24-row QSH display
-        // on very wide results and the separator scrolls off before detection
-        // can see it (a ~180-char libraries row is 3 rows; the ~700-char
-        // SYSTEM_STATUS_INFO * row is ~9 rows, so even 3 probe lines = 27
-        // rows overflowed — observed live 2026-10-20). 2 lines stay on
-        // screen up to ~880 chars, which covers everything the 16-slice
-        // stitch can assemble.
-        java.util.List<String> head = readFileChunk(file, 1, Math.min(2, cap), false);
+        // Probe with the first 3 lines: on the one-shot screen the 2-line
+        // probe (tried 2026-10-20, patch v6) silently stopped detecting
+        // overflow — every wide one-shot query fell back to the legacy read
+        // while session runs and the 3-line probe engaged slices fine.
+        // Bisect: 3 is the last-known-good probe depth in both modes.
+        java.util.List<String> head = readFileChunk(file, 1, Math.min(3, cap), false);
         if (head.size() < 2) return readFileLegacy(file, cap);
         // The separator line is the first all-dashes line — NOT necessarily
         // line 2: a wide result's HEADER wraps too, so the separator can sit
@@ -384,7 +380,7 @@ public class Tn5250Run {
         }
         if (!overflow) {
             java.util.List<String> allLines = new ArrayList<>(head);
-            for (int a = 3; a <= cap; a += 7) {
+            for (int a = 4; a <= cap; a += 7) {
                 int b = Math.min(a + 6, cap);
                 allLines.addAll(readFileChunk(file, a, b, false));
             }
